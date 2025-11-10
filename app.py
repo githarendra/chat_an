@@ -60,15 +60,23 @@ def init_firebase():
                  st.error("Firebase credentials dictionary is empty. Please check your secrets.")
                  st.stop()
 
-            # --- THIS IS THE KEY FIX ---
-            # The 'private_key' in TOML or pasted strings often has escaped newlines (\\n)
-            # This replaces them with actual newlines (\n) for Firebase to read.
+            # --- THIS IS THE KEY FIX (More Robust Version) ---
             if "private_key" in creds_dict:
-                # REMOVED: key_with_newlines = creds_dict["private_key"].replace("\\n", "\n")
+                # Get the key
+                key = creds_dict["private_key"]
                 
-                # UPDATED: Just strip whitespace from the key.
-                # The newlines are handled correctly by the TOML parser or ast.literal_eval.
-                creds_dict["private_key"] = creds_dict["private_key"].strip()
+                # 1. Replace any Windows newlines with Unix newlines
+                key = key.replace("\r\n", "\n")
+                
+                # 2. Replace any escaped newlines (from a single-line string)
+                #    with actual newlines.
+                key = key.replace("\\n", "\n")
+
+                # 3. Strip leading/trailing whitespace (a common copy-paste error)
+                key = key.strip()
+                
+                # Assign the cleaned key back
+                creds_dict["private_key"] = key
             # --- END OF FIX ---
 
             # Now, creds_dict is a proper dictionary, and this call will work

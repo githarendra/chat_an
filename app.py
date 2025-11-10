@@ -4,6 +4,7 @@ from firebase_admin import credentials, firestore
 import uuid
 import datetime
 from streamlit_autorefresh import st_autorefresh
+import ast  # For safely parsing the secret string
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -13,19 +14,51 @@ st.set_page_config(
     initial_sidebar_state="auto"
 )
 
-# --- Firebase Initialization ---
-# This function initializes Firebase, handling reruns gracefully.
+# --- Firebase Initialization (UPDATED) ---
 def init_firebase():
     """Initializes the Firebase Admin SDK."""
     if not firebase_admin._apps:
         try:
             # Load credentials from Streamlit's secrets
-            creds_dict = st.secrets["firebase_service_account"]
+            creds_from_secrets = st.secrets["firebase_service_account"]
+            
+            creds_dict = None
+            
+            # Check if the secret is a string (e.g., from pasted JSON/dict string)
+            if isinstance(creds_from_secrets, str):
+                try:
+                    # Safely parse the string into a dictionary
+                    creds_dict = ast.literal_eval(creds_from_secrets)
+                except (ValueError, SyntaxError) as e:
+                    st.error(f"Failed to parse firebase_service_account string. Make sure it's a valid dict/JSON. Error: {e}")
+                    st.stop()
+            # Check if it's already a dictionary (correct TOML format)
+            elif isinstance(creds_from_secrets, dict):
+                creds_dict = creds_from_secrets
+            else:
+                st.error("firebase_service_account secret is not in a recognized format (string or dict).")
+                st.stop()
+
+            # --- THIS IS THE KEY FIX ---
+            # The 'private_key' in TOML or pasted strings often has escaped newlines (\\n)
+            # This replaces them with actual newlines (\n) for Firebase to read.
+            if "private_key" in creds_dict:
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+            # --- END OF FIX ---
+
+            # Now, creds_dict is a proper dictionary, and this call will work
             creds = credentials.Certificate(creds_dict)
+            
             firebase_admin.initialize_app(creds)
             st.toast("Firebase connection successful! 🔥", icon="🎉")
+        
+        except ValueError as e:
+            # This will catch if creds_dict is still invalid
+            st.error("Firebase initialization failed. The credential data is likely invalid.")
+            st.exception(e) # Show the full error
+            st.stop()
         except Exception as e:
-            st.error("Firebase initialization failed. Check your `secrets.toml` file.")
+            st.error("Firebase initialization failed. Check your `secrets.toml` file or Streamlit Cloud secrets.")
             st.exception(e)
             st.stop()
     
@@ -45,9 +78,8 @@ except Exception as e:
 
 
 # --- Session State Initialization ---
-# This ensures we have placeholders for user info and app state.
 if 'user_id' not in st.session_state:
-    st.session_state.user_id = None
+    st.session_state.user_id = str(uuid.uuid4()) # Generate ID on first load
 if 'display_name' not in st.session_state:
     st.session_state.display_name = None
 if 'avatar' not in st.session_state:
@@ -60,24 +92,32 @@ if 'chat_ready' not in st.session_state:
 @st.cache_data(ttl=60) # Cache user list for 60 seconds
 def get_user_list():
     """Fetches all users from Firestore."""
-    users_ref = db.collection(USERS_COLLECTION).stream()
-    users = []
-    for user in users_ref:
-        users.append(user.to_dict())
-    return users
+    try:
+        users_ref = db.collection(USERS_COLLECTION).stream()
+        users = []
+        for user in users_ref:
+            users.append(user.to_dict())
+        return users
+    except Exception as e:
+        st.error(f"Error fetching user list: {e}")
+        return []
 
 def load_messages():
     """Fetches and sorts messages from Firestore."""
-    messages_ref = db.collection(MESSAGES_COLLECTION).order_by("timestamp", direction=firestore.Query.ASCENDING)
-    docs = messages_ref.stream()
-    
-    messages = []
-    for doc in docs:
-        msg = doc.to_dict()
-        # Only include messages that have a valid timestamp
-        if 'timestamp' in msg and msg['timestamp']:
-            messages.append(msg)
-    return messages
+    try:
+        messages_ref = db.collection(MESSAGES_COLLECTION).order_by("timestamp", direction=firestore.Query.ASCENDING)
+        docs = messages_ref.stream()
+        
+        messages = []
+        for doc in docs:
+            msg = doc.to_dict()
+            # Only include messages that have a valid timestamp
+            if 'timestamp' in msg and msg['timestamp']:
+                messages.append(msg)
+        return messages
+    except Exception as e:
+        st.error(f"Error loading messages: {e}")
+        return []
 
 # --- UI Rendering ---
 
@@ -97,24 +137,20 @@ if not st.session_state.chat_ready:
                 st.error("Please enter a display name.")
             else:
                 with st.spinner("Joining..."):
-                    # Generate a unique ID for the user's session
-                    user_id = str(uuid.uuid4())
-                    
                     # Store user info in session state
-                    st.session_state.user_id = user_id
                     st.session_state.display_name = display_name
                     st.session_state.avatar = avatar
                     st.session_state.chat_ready = True
                     
                     try:
                         # Save user profile to Firestore
-                        user_doc_ref = db.collection(USERS_COLLECTION).document(user_id)
+                        user_doc_ref = db.collection(USERS_COLLECTION).document(st.session_state.user_id)
                         user_doc_ref.set({
-                            "user_id": user_id,
+                            "user_id": st.session_state.user_id,
                             "display_name": display_name,
                             "avatar": avatar,
                             "joined_at": firestore.SERVER_TIMESTAMP
-                        })
+                        }, merge=True) # Use merge=True to update or create
                         st.rerun()
                     except Exception as e:
                         st.error("Failed to save user profile.")
@@ -147,63 +183,51 @@ else:
     st.title(f"Anonymous Chat Room")
 
     # Auto-refresh messages every 3 seconds (3000ms)
-    # This polls Firestore for updates from other users
     st_autorefresh(interval=3000, key="chat_refresher")
 
     # Display Chat Messages
-    # We create a container to hold messages
-    chat_container = st.container()
+    chat_container = st.container(height=400) # Set a fixed height
     
     try:
         messages = load_messages()
         
         with chat_container:
-            if not messages:
-                st.info("No messages yet. Be the first to say something!")
-            
             for msg in messages:
-                # Check if the message is from the current user
-                is_current_user = msg.get('user_id') == st.session_state.user_id
+                # Check if 'user_id' exists before accessing
+                msg_user_id = msg.get('user_id')
                 
-                # Determine role for alignment ('user' = right, 'assistant' = left)
-                role = "user" if is_current_user else "assistant"
+                # Determine if the message is from the current user
+                is_user = (msg_user_id == st.session_state.user_id)
                 
-                with st.chat_message(name=msg.get('display_name', '...'), avatar=msg.get('avatar', '👤')):
-                    st.markdown(msg.get('text', ''))
-                    
-                    # Show timestamp subtly
-                    ts = msg.get('timestamp')
-                    if ts:
-                        # Convert Firestore timestamp to human-readable time
-                        local_time = ts.astimezone(datetime.datetime.now().astimezone().tzinfo)
-                        st.caption(f"_{local_time.strftime('%I:%M %p')}_")
+                # Set avatar based on who sent it
+                # Use a default '👤' if avatar is missing
+                avatar = msg.get('avatar', '👤') if not is_user else None
 
+                # Use st.chat_message for a native chat look
+                with st.chat_message(name=msg.get('display_name', 'Guest'), avatar=avatar):
+                    st.markdown(msg.get('text', '*message not found*'))
+                    
     except Exception as e:
         st.error("Failed to load messages.")
         st.exception(e)
 
-    # --- Chat Input (Pinned to bottom) ---
-    prompt = st.chat_input("Type your message...")
-
+    # --- Chat Input Box ---
+    prompt = st.chat_input("What's on your mind?")
     if prompt:
-        if not prompt.strip():
-            st.toast("Message cannot be empty!", icon="⚠️")
+        if not st.session_state.chat_ready or not st.session_state.display_name:
+            st.error("You must join the chat to send messages.")
         else:
             try:
-                # Create the message payload
-                message_data = {
-                    "text": prompt,
+                # Add new message to Firestore
+                doc_ref = db.collection(MESSAGES_COLLECTION).document()
+                doc_ref.set({
+                    "user_id": st.session_state.user_id,
                     "display_name": st.session_state.display_name,
                     "avatar": st.session_state.avatar,
-                    "user_id": st.session_state.user_id,
+                    "text": prompt,
                     "timestamp": firestore.SERVER_TIMESTAMP
-                }
-                
-                # Add message to Firestore
-                db.collection(MESSAGES_COLLECTION).add(message_data)
-                
-                # No need to call st.rerun() here, 
-                # st.chat_input triggers a rerun on its own!
+                })
+                # Don't rerun, just let the auto-refresher pick it up
             except Exception as e:
                 st.error("Failed to send message.")
                 st.exception(e)

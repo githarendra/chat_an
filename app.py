@@ -19,25 +19,46 @@ def init_firebase():
     """Initializes the Firebase Admin SDK."""
     if not firebase_admin._apps:
         try:
+            # --- NEW CHECK ---
+            # Check if the secret key exists at all
+            if "firebase_service_account" not in st.secrets:
+                st.error("Firebase secrets not found. Please add [firebase_service_account] to your .streamlit/secrets.toml or Streamlit Cloud secrets.")
+                st.stop()
+            # --- END NEW CHECK ---
+
             # Load credentials from Streamlit's secrets
             creds_from_secrets = st.secrets["firebase_service_account"]
             
             creds_dict = None
             
+            # --- UPDATED LOGIC ---
+            # Check if it's a dict-like object (from TOML)
+            # Streamlit's SecretsT object might not be a true dict, 
+            # but it will have dict-like methods.
+            if hasattr(creds_from_secrets, 'keys'):
+                # Convert Streamlit's SecretsT object to a plain dict
+                creds_dict = dict(creds_from_secrets)
             # Check if the secret is a string (e.g., from pasted JSON/dict string)
-            if isinstance(creds_from_secrets, str):
+            elif isinstance(creds_from_secrets, str):
+                if not creds_from_secrets.strip():
+                    st.error("Firebase secret is an empty string. Please provide the service account details.")
+                    st.stop()
                 try:
                     # Safely parse the string into a dictionary
                     creds_dict = ast.literal_eval(creds_from_secrets)
                 except (ValueError, SyntaxError) as e:
                     st.error(f"Failed to parse firebase_service_account string. Make sure it's a valid dict/JSON. Error: {e}")
                     st.stop()
-            # Check if it's already a dictionary (correct TOML format)
-            elif isinstance(creds_from_secrets, dict):
-                creds_dict = creds_from_secrets
+            # --- END UPDATED LOGIC ---
             else:
-                st.error("firebase_service_account secret is not in a recognized format (string or dict).")
+                st.error("firebase_service_account secret is not in a recognized format (dict-like or string).")
+                st.write(f"Type found: {type(creds_from_secrets)}") # Add type info to error
                 st.stop()
+
+            # Check if the resulting dict is empty
+            if not creds_dict:
+                 st.error("Firebase credentials dictionary is empty. Please check your secrets.")
+                 st.stop()
 
             # --- THIS IS THE KEY FIX ---
             # The 'private_key' in TOML or pasted strings often has escaped newlines (\\n)

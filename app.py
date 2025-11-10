@@ -4,7 +4,8 @@ from firebase_admin import credentials, firestore
 import uuid
 import datetime
 from streamlit_autorefresh import st_autorefresh
-import ast  # For safely parsing the secret string
+import json  # Import the built-in JSON library
+import ast # We'll keep this just in case, but json is preferred
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -14,72 +15,46 @@ st.set_page_config(
     initial_sidebar_state="auto"
 )
 
-# --- Firebase Initialization (UPDATED) ---
+# --- Firebase Initialization (NEW APPROACH) ---
 def init_firebase():
     """Initializes the Firebase Admin SDK."""
     if not firebase_admin._apps:
         try:
-            # --- NEW CHECK ---
-            # Check if the secret key exists at all
-            if "firebase_service_account" not in st.secrets:
-                st.error("Firebase secrets not found. Please add [firebase_service_account] to your .streamlit/secrets.toml or Streamlit Cloud secrets.")
-                st.stop()
-            # --- END NEW CHECK ---
+            # --- NEW LOGIC ---
+            # This is the new, simpler secret key we look for.
+            secret_key = "FIREBASE_SERVICE_ACCOUNT_JSON"
 
-            # Load credentials from Streamlit's secrets
-            creds_from_secrets = st.secrets["firebase_service_account"]
-            
-            creds_dict = None
-            
-            # --- UPDATED LOGIC ---
-            # Check if it's a dict-like object (from TOML)
-            # Streamlit's SecretsT object might not be a true dict, 
-            # but it will have dict-like methods.
-            if hasattr(creds_from_secrets, 'keys'):
-                # Convert Streamlit's SecretsT object to a plain dict
-                creds_dict = dict(creds_from_secrets)
-            # Check if the secret is a string (e.g., from pasted JSON/dict string)
-            elif isinstance(creds_from_secrets, str):
-                if not creds_from_secrets.strip():
-                    st.error("Firebase secret is an empty string. Please provide the service account details.")
-                    st.stop()
+            if secret_key not in st.secrets:
+                st.error(f"Firebase secret `{secret_key}` not found.")
+                st.info("Please update your secrets to store the entire service account JSON as a string.")
+                st.stop()
+
+            # Load the entire JSON string from secrets
+            json_string = st.secrets[secret_key]
+
+            if not json_string.strip():
+                st.error("Firebase secret is an empty string.")
+                st.stop()
+
+            try:
+                # Parse the JSON string into a dictionary
+                # This is much more robust than ast.literal_eval or TOML parsing.
+                creds_dict = json.loads(json_string)
+            except json.JSONDecodeError:
+                st.error("Failed to parse Firebase JSON. Trying ast.literal_eval...")
                 try:
-                    # Safely parse the string into a dictionary
-                    creds_dict = ast.literal_eval(creds_from_secrets)
-                except (ValueError, SyntaxError) as e:
-                    st.error(f"Failed to parse firebase_service_account string. Make sure it's a valid dict/JSON. Error: {e}")
+                    # Fallback for a dict string that isn't strict JSON
+                    creds_dict = ast.literal_eval(json_string)
+                except Exception as e:
+                    st.error(f"Failed to parse firebase_service_account string. Make sure it's valid JSON. Error: {e}")
                     st.stop()
-            # --- END UPDATED LOGIC ---
-            else:
-                st.error("firebase_service_account secret is not in a recognized format (dict-like or string).")
-                st.write(f"Type found: {type(creds_from_secrets)}") # Add type info to error
-                st.stop()
-
-            # Check if the resulting dict is empty
-            if not creds_dict:
-                 st.error("Firebase credentials dictionary is empty. Please check your secrets.")
+            
+            if not isinstance(creds_dict, dict):
+                 st.error("Firebase secret did not parse into a dictionary.")
                  st.stop()
+            # --- END NEW LOGIC ---
 
-            # --- THIS IS THE KEY FIX (More Robust Version) ---
-            if "private_key" in creds_dict:
-                # Get the key
-                key = creds_dict["private_key"]
-                
-                # 1. Replace any Windows newlines with Unix newlines
-                key = key.replace("\r\n", "\n")
-                
-                # 2. Replace any escaped newlines (from a single-line string)
-                #    with actual newlines.
-                key = key.replace("\\n", "\n")
-
-                # 3. Strip leading/trailing whitespace (a common copy-paste error)
-                key = key.strip()
-                
-                # Assign the cleaned key back
-                creds_dict["private_key"] = key
-            # --- END OF FIX ---
-
-            # Now, creds_dict is a proper dictionary, and this call will work
+            # Now, creds_dict is a proper dictionary
             creds = credentials.Certificate(creds_dict)
             
             firebase_admin.initialize_app(creds)

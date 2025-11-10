@@ -64,10 +64,11 @@ def init_firebase():
             # The 'private_key' in TOML or pasted strings often has escaped newlines (\\n)
             # This replaces them with actual newlines (\n) for Firebase to read.
             if "private_key" in creds_dict:
-                # First, fix newlines for the "pasted string" case
-                key_with_newlines = creds_dict["private_key"].replace("\\n", "\n")
-                # NEW: Strip leading/trailing whitespace which can corrupt the PEM parser
-                creds_dict["private_key"] = key_with_newlines.strip()
+                # REMOVED: key_with_newlines = creds_dict["private_key"].replace("\\n", "\n")
+                
+                # UPDATED: Just strip whitespace from the key.
+                # The newlines are handled correctly by the TOML parser or ast.literal_eval.
+                creds_dict["private_key"] = creds_dict["private_key"].strip()
             # --- END OF FIX ---
 
             # Now, creds_dict is a proper dictionary, and this call will work
